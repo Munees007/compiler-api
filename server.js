@@ -20,22 +20,36 @@ const rateLimit = require("express-rate-limit");
 const os = require("os");
 const cors = require("cors");
 
+const exeDir = path.dirname(process.execPath);
+const compilerEnvPath = path.join(exeDir, "..", "compiler_env");
+const tRoot = path.join(os.tmpdir(), "compiler_temp");
+fs.ensureDirSync(tRoot);
 // === CONFIG ===
 const CONFIG = {
   port: 3000,
-  tmpRoot: path.join(__dirname, "temp"), // make sure this is writable
+  tmpRoot: tRoot, // make sure this is writable
   maxConcurrent: 4, // how many compile/execution jobs run in parallel
   perJobTimeoutMs: 8000, // kill job after this ms
   maxStdoutBytes: 200 * 1024, // 200 KB
   perIpWindowMs: 60 * 1000, // 1 minute window
   perIpMaxRequests: 60, // max requests per IP per window
   useFirejailIfAvailable: true, // will prefix commands with firejail --quiet --private if found (Linux only)
-  compilers: {
-    cpp: { exe: "g++", runBinarySuffix: os.platform() === "win32" ? ".exe" : "" },
-    java: { javac: "javac", java: "java" },
-    python: { exe: "python" },
-    node: { exe: "node" }
+  compilers:  {
+  cpp: { 
+    exe: path.join(compilerEnvPath, "cpp", "bin", os.platform() === "win32" ? "g++.exe" : "g++"), 
+    runBinarySuffix: os.platform() === "win32" ? ".exe" : "" 
+  },
+  java: { 
+    javac: path.join(compilerEnvPath, "java", "bin", os.platform() === "win32" ? "javac.exe" : "javac"), 
+    java: path.join(compilerEnvPath, "java", "bin", os.platform() === "win32" ? "java.exe" : "java") 
+  },
+  python: { 
+    exe: path.join(compilerEnvPath, "python", "bin", os.platform() === "win32" ? "python.exe" : "python") 
+  },
+  node: { 
+    exe: path.join(compilerEnvPath, "node", "bin", os.platform() === "win32" ? "node.exe" : "node") 
   }
+}
 };
 // ==============
 
@@ -156,13 +170,14 @@ async function handleJob(language, code, stdin, jobTmpDir) {
   // normalize stdin to string (ensure newline if user expects)
   const stdinData = (typeof stdin === "string") ? stdin : "";
   // do not auto-add newline; let caller specify "5\n"
-
+  console.log(`Handling job in ${language}, tmpDir: ${jobTmpDir}`);
   if (language === "cpp") {
     const src = "main.cpp";
     safeFile(src, code);
     const outBinName = "main" + CONFIG.compilers.cpp.runBinarySuffix;
     const outBinPath = path.join(jobTmpDir, outBinName);
     const gpp = CONFIG.compilers.cpp.exe;
+    console.log("Using g++ at:", gpp);
 
     const compileArgs = [path.join(jobTmpDir, src), "-O2", "-std=c++17", "-o", outBinPath];
     const compileCmd = firejailAvailable ? "firejail" : gpp;
@@ -170,18 +185,27 @@ async function handleJob(language, code, stdin, jobTmpDir) {
 
     const compileRes = await runCommandWithTimeout(compileCmd, compileArgsFinal, { cwd: jobTmpDir }, CONFIG.perJobTimeoutMs);
     if (compileRes.timedOut) return { error: "Compilation timed out" };
-    if (compileRes.code !== 0) return { stderr: compileRes.stderr || compileRes.stdout || "Compilation error" };
+    if (compileRes.code !== 0) 
+      {
+          console.log({ stdout: compileRes.stdout, stderr: compileRes.stderr, exitCode: compileRes.code })
+          return { stderr: compileRes.stderr || compileRes.stdout || "Compilation error" };
+      } 
 
     if (!firejailAvailable) {
       // spawn the binary directly and pass stdinData
       const runRes = await runCommandWithTimeout(outBinPath, [], { cwd: jobTmpDir, shell: false }, CONFIG.perJobTimeoutMs, stdinData);
       if (runRes.timedOut) return { error: "Execution timed out" };
+      console.log("❌ Compilation failed!");
+      console.log({ stdout: runRes.stdout, stderr: runRes.stderr, exitCode: runRes.code });
       return { stdout: runRes.stdout, stderr: runRes.stderr, exitCode: runRes.code };
     } else {
       // run via firejail wrapper
       const argsForFirejail = ["--quiet", "--private=" + jobTmpDir, "--", outBinPath];
       const runRes = await runCommandWithTimeout("firejail", argsForFirejail, { cwd: jobTmpDir }, CONFIG.perJobTimeoutMs, stdinData);
       if (runRes.timedOut) return { error: "Execution timed out" };
+      console.log("❌ Compilation failed!");
+      console.log({ stdout: runRes.stdout, stderr: runRes.stderr, exitCode: runRes.code });
+
       return { stdout: runRes.stdout, stderr: runRes.stderr, exitCode: runRes.code };
     }
 
@@ -190,7 +214,7 @@ async function handleJob(language, code, stdin, jobTmpDir) {
     safeFile(src, code);
     const javac = CONFIG.compilers.java.javac;
     const javaCmd = CONFIG.compilers.java.java;
-
+    console.log("Using g++ at:", javac);
     const compileRes = await runCommandWithTimeout(javac, [path.join(jobTmpDir, src)], { cwd: jobTmpDir }, CONFIG.perJobTimeoutMs);
     if (compileRes.timedOut) return { error: "Compilation timed out" };
     if (compileRes.code !== 0) return { stderr: compileRes.stderr || compileRes.stdout || "Compilation error" };
